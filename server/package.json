@@ -13,7 +13,7 @@
 	"description": "Byerun Proxy Server for Vercel",
 	"dependencies": {
 		"express": "^4.21.1",
-		"node-fetch": "^3.3.2",
+		"node-fetch": "^2.6.7",
 		"morgan": "^1.10.0",
 		"winston": "^3.17.0"
 	}
