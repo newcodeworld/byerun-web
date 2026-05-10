@@ -1,78 +1,67 @@
-const express = require('express');
-const fetch = (...args) => import('node-fetch').then(({ default: fetch }) => fetch(...args));
-const morgan = require('morgan');
-const { createLogger, transports, format } = require('winston');
+// Vercel Serverless Function 不需要 require express
+// 只需要导出一个异步函数
 
-const app = express();
-const port = 3000;
+// 注意：node-fetch v3+ 需要使用 import，但在 Vercel Node.js 环境中可以直接引用
+import fetch from 'node-fetch'; // 如果报错，可以尝试 const fetch = (...args) => import('node-fetch').then(({default: fetch}) => fetch(...args))
 
-// 创建 winston 日志记录器
-const logger = createLogger({
-    level: 'info',
-    format: format.combine(
-        format.timestamp(),
-        format.printf(({ timestamp, level, message }) => {
-            return `${timestamp} ${level}: ${message}`;
-        })
-    ),
-    transports: [
-        new transports.Console(),
-        new transports.File({ filename: 'combined.log' })
-    ]
-});
+// Serverless 函数没有全局日志实例，直接使用 console 即可
+// 如果需要更复杂的日志，Vercel 的控制台会自动捕获 console 输出
 
-// 使用 morgan 中间件记录 HTTP 请求日志
-app.use(morgan('combined', { stream: { write: message => logger.info(message.trim()) } }));
+export default async function handler(req, res) {
+  // 1. 处理预检请求 (OPTIONS)
+  if (req.method === 'OPTIONS') {
+    res.setHeader('Access-Control-Allow-Origin', '*');
+    res.setHeader('Access-Control-Allow-Methods', 'GET, POST, PUT, DELETE, OPTIONS');
+    res.setHeader('Access-Control-Allow-Headers', '*');
+    return res.status(200).end();
+  }
 
-// 设置请求主体大小限制
-app.use(express.json({ limit: '10mb' }));
-app.use(express.urlencoded({ limit: '10mb', extended: true }));
+  // 2. 构建后端 URL
+  // Vercel 环境下，req.url 是路径+查询参数
+  const backendUrl = 'https://run-lb.tanmasports.com/v1' + req.url;
 
-app.use((req, res, next) => {
-    if (req.method === 'OPTIONS') {
-        res.set({
-            'Access-Control-Allow-Origin': '*',
-            'Access-Control-Allow-Methods': 'GET, POST, PUT, DELETE, OPTIONS',
-            'Access-Control-Allow-Headers': '*'
-        });
-        res.sendStatus(200);
-    } else {
-        next();
-    }
-});
+  // 3. 准备请求头
+  const { ...headers } = req.headers;
+  // 删除 Vercel 平台特定的内部头（可选，防止转发冲突）
+  delete headers['x-vercel-forwarded-for']; 
+  delete headers['x-vercel-id'];
+  // 必须删除 host，否则后端会因为 Host 不匹配而拒绝
+  delete headers['host']; 
 
-app.all('*', async (req, res) => {
-    const url = new URL(req.originalUrl, `http://${req.headers.host}`);
-    const backendUrl = 'https://run-lb.tanmasports.com/v1' + url.pathname + url.search;
+  try {
+    // 4. 发起代理请求
+    // 注意：Serverless 函数中 req.body 在 Vercel 中通常已经是解析好的对象
+    const body = req.method !== 'GET' && req.body ? JSON.stringify(req.body) : undefined;
 
-    logger.info(`Forwarding request to: ${backendUrl}`);
+    const response = await fetch(backendUrl, {
+      method: req.method,
+      headers: headers,
+      body: body,
+    });
 
-    const newHeaders = { ...req.headers };
-    delete newHeaders.host;
+    const data = await response.text(); // 使用 text() 以保持原始格式（包括 HTML/JSON）
 
-    const init = {
-        method: req.method,
-        headers: newHeaders,
-        body: req.method === 'GET' ? null : JSON.stringify(req.body)
-    };
+    // 5. 返回响应给客户端
+    res.setHeader('Access-Control-Allow-Origin', '*');
+    res.setHeader('Access-Control-Allow-Methods', 'GET, POST, PUT, DELETE, OPTIONS');
+    res.setHeader('Access-Control-Allow-Headers', '*');
+    
+    // 将后端的状态码和数据返回
+    res.status(response.status).send(data);
 
-    try {
-        const response = await fetch(backendUrl, init);
-        const body = await response.text();
+  } catch (error) {
+    console.error('Proxy Error:', error);
+    res.status(500).json({ error: 'Proxy request failed' });
+  }
+}
 
-        res.set({
-            'Access-Control-Allow-Origin': '*',
-            'Access-Control-Allow-Methods': 'GET, POST, PUT, DELETE, OPTIONS',
-            'Access-Control-Allow-Headers': '*'
-        });
-
-        res.status(response.status).send(body);
-    } catch (error) {
-        logger.error(`Error during fetch: ${error.message}`);
-        res.status(500).send('Internal Server Error');
-    }
-});
-
-app.listen(port, () => {
-    logger.info(`Server is running on http://localhost:${port}`);
-});
+// Vercel 配置（可选）
+export const config = {
+  api: {
+    bodyParser: {
+      sizeLimit: '10mb', // 对应你原来的 limit: '10mb'
+    },
+    // 如果你的请求体很大，可能需要关闭 bodyParser 让你手动处理
+    // bodyParser: false 
+  },
+};
